@@ -1849,9 +1849,9 @@ Config.add("Clear", Clear, { "UseBlock", "ScaffoldId", "Collect", "Sweep" })
 Config.add("Farmer", Farmer, {
     "Harvest", "Plant", "Collect", "UseBlock", "ScaffoldId", "HarvestMs", "PlantMs", "SeedId",
 })
--- TEST ONLY: turunkan jeda client untuk menguji rate-limit/server validation.
+-- update 1084: game memberi jeda minimal antar aksi (place ~0.135 dtk, pukul ~0.19 dtk)
 State.PlaceMs = math.max(State.PlaceMs, 140)
-State.BreakMs = math.max(State.BreakMs, 10)
+State.BreakMs = math.max(State.BreakMs, 200)
 Farmer.HarvestMs = math.max(Farmer.HarvestMs, 140)
 Farmer.PlantMs = math.max(Farmer.PlantMs, 140)
 Config.add("Misc", Misc, { "Speed" })
@@ -2915,7 +2915,7 @@ local function takeDrop(d)
         State.CollectFail += 1
         d.refused = os.clock() -- tanda ditolak, sama seperti game
         d.failN = (d.failN or 0) + 1
-        DropFailUntil[d.uid] = os.clock() + math.min(8, d.failN) -- 1, 2, 3.. detik (yang terus ditolak makin jarang)
+        DropFailUntil[d.uid] = os.clock() + math.min(4, 0.5 * (2 ^ math.min(d.failN - 1, 3))) -- retry bertahap, maksimum 4 detik
         d.flown = nil
         if typeof(d.frame) == "Instance" then pcall(function() d.frame.Visible = not d.culled end) end
         return false
@@ -2971,6 +2971,8 @@ function Drops.remoteTick(list, s)
     local cx, cy = s.x, s.y - 0.475
     local ptx, pty = getPlayerTile()
     local now = os.clock()
+    -- Jeda singkat antar request, bahkan setelah satu request selesai.
+    if Drops.RemoteBusy or now < (Drops.RemoteNextAt or 0) then return end
     local R = (State.CollectRadius or 3) + 0.2
     local world, budget, targets, scheduled = Refs.World, { next = os.clock() + 0.0015 }, {}, 0
     if farmArea and ptx then
@@ -2999,9 +3001,21 @@ function Drops.remoteTick(list, s)
                 end
             end
             if hit then
-                task.spawn(takeDrop, d)
-                scheduled += 1
-                if scheduled >= 8 then break end
+                -- Remote collection dibuat serial: satu InvokeServer aktif pada satu waktu.
+                -- Ini menghindari burst 8 request yang sering membuat server menolak/menjatuhkan request.
+                if not Drops.RemoteBusy then
+                    Drops.RemoteBusy = true
+                    scheduled += 1
+                    task.spawn(function()
+                        local okCall, result = pcall(takeDrop, d)
+                        if not okCall then
+                            warn("[n4th] Remote collect error: " .. tostring(result))
+                        end
+                        Drops.RemoteBusy = false
+                        Drops.RemoteNextAt = os.clock() + 0.12
+                    end)
+                    break
+                end
             end
         end
         Session.scanStep(budget, #list - i + 1)
@@ -10086,9 +10100,9 @@ addNumber(SpeedTab, {
 })
 
 addNumber(SpeedTab, {
-    Title = "Speed Break TEST (ms)",
-    Desc = "Jeda client antar pukulan. 10 ms untuk menguji apakah server membatasi hit; bukan jaminan 1-hit.",
-    Min = 10, Max = 1000, Step = 10, Default = State.BreakMs,
+    Title = "Speed Break (ms)",
+    Desc = "Jeda tiap pukulan (normal 220). Dipakai juga Clear",
+    Min = 200, Max = 1000, Step = 10, Default = State.BreakMs,
     Callback = function(v) State.BreakMs = math.floor(v) end,
 })
 
